@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, MessageCircle, Upload, X, Calendar, Image as ImageIcon, Video, Search, Trash2, Pencil, Users } from 'lucide-react';
+import { Heart, MessageCircle, Upload, X, Calendar, Image as ImageIcon, Video, Search, Trash2, Pencil, Loader } from 'lucide-react';
+import { initDB, saveData, getData, deleteData } from './db';
 
 /**
  * Ứng dụng: Gia đình họ Đặng - Lưu giữ kỷ niệm
  * Tác giả: Chuyên gia React (Mô phỏng)
- * * Cấu trúc dữ liệu (Data Structure):
- * Kỷ niệm (Memory): { id, type, url, caption, date, family: string, likes, comments }
+ * Cấu trúc dữ liệu (Data Structure):
+ * Kỷ niệm (Memory): { id, type, caption, date, family: string, likes, comments } -> Dữ liệu file (ảnh/video) được lưu riêng trong IndexedDB.
  * Bình luận (Comment): { author: string, text: string, time: string }
  */
 
@@ -20,10 +21,129 @@ const FAMILIES = [
   "Hoa - Hà"
 ];
 
+/**
+ * Nén một tệp hình ảnh bằng Canvas API.
+ * @param {File} file Tệp hình ảnh cần nén.
+ * @param {object} options Tùy chọn nén.
+ * @param {number} options.quality Chất lượng ảnh (0 đến 1).
+ * @param {number} options.maxWidth Chiều rộng tối đa.
+ * @param {number} options.maxHeight Chiều cao tối đa.
+ * @returns {Promise<Blob>} Một promise trả về ảnh đã nén dưới dạng Blob.
+ */
+const compressImage = (file, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const { quality = 0.85, maxWidth = 1920, maxHeight = 1920 } = options;
+    const reader = new FileReader();
+    
+    reader.onload = (event) => {
+      const img = new Image();
+      img.src = event.target.result;
+      
+      img.onload = () => {
+        let { width, height } = img;
+
+        if (width > height) {
+          if (width > maxWidth) {
+            height = Math.round(height * (maxWidth / width));
+            width = maxWidth;
+          }
+        } else {
+          if (height > maxHeight) {
+            width = Math.round(width * (maxHeight / height));
+            height = maxHeight;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob(
+          (blob) => {
+            if (blob) {
+              resolve(blob);
+            } else {
+              reject(new Error('Nén ảnh thất bại.'));
+            }
+          },
+          file.type, // Giữ nguyên định dạng ảnh (jpeg, png,...)
+          quality
+        );
+      };
+      
+      img.onerror = (error) => reject(error);
+    };
+    
+    reader.onerror = (error) => reject(error);
+    reader.readAsDataURL(file);
+  });
+};
+
+
+// --- COMPONENT CON: MEMORY ITEM ---
+const MemoryItem = ({ memory, onSelect, onDataLoaded }) => {
+  const [mediaUrl, setMediaUrl] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    let objectUrl;
+    const loadMedia = async () => {
+      try {
+        setIsLoading(true);
+        const data = await getData(memory.id);
+        if (data) {
+          objectUrl = URL.createObjectURL(data);
+          setMediaUrl(objectUrl);
+          onDataLoaded(memory.id, objectUrl, data.type);
+        }
+      } catch (error) {
+        console.error("Lỗi khi tải media từ IndexedDB:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadMedia();
+
+    return () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [memory.id, onDataLoaded]);
+
+  return (
+    <div className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg cursor-pointer shadow-sm hover:shadow-lg transition-all" onClick={() => onSelect({ ...memory, url: mediaUrl })}>
+      {isLoading ? (
+        <div className="w-full h-full flex items-center justify-center text-amber-500"><Loader className="animate-spin" /></div>
+      ) : mediaUrl ? (
+        <>
+          {memory.type.startsWith('video') ? <video src={mediaUrl} className="w-full h-full object-cover" /> : <img src={mediaUrl} alt={memory.caption} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />}
+          <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4 text-white">
+            <div className="flex items-center gap-1 font-bold"><Heart size={20} fill="white" /> {memory.likes}</div>
+            <div className="flex items-center gap-1 font-bold"><MessageCircle size={20} /> {memory.comments.length}</div>
+          </div>
+          <div className="absolute top-2 right-2 text-white drop-shadow-md">{memory.type.startsWith('video') ? <Video size={16} /> : <ImageIcon size={16} />}</div>
+          {memory.family && <div className="absolute bottom-2 left-2 text-white text-xs bg-black/50 px-1.5 py-0.5 rounded">{memory.family}</div>}
+        </>
+      ) : (
+        <div className="w-full h-full flex flex-col items-center justify-center text-center p-2 text-red-500">
+            <ImageIcon size={24}/>
+            <p className="text-xs mt-1">Không tìm thấy dữ liệu ảnh/video</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+
 const App = () => {
   // --- KHỞI TẠO STATE (TRẠNG THÁI) ---
   const [memories, setMemories] = useState(() => {
-    const saved = localStorage.getItem('family_memories');
+    const saved = localStorage.getItem('family_memories_metadata');
     return saved ? JSON.parse(saved) : [];
   });
 
@@ -49,52 +169,110 @@ const App = () => {
   const [editingCaption, setEditingCaption] = useState('');
   const [likedPosts, setLikedPosts] = useState([]);
   const [currentUser, setCurrentUser] = useState('');
+  const [isDbReady, setIsDbReady] = useState(false);
 
   // --- HIỆU ỨNG (EFFECTS) ---
 
   useEffect(() => {
-    localStorage.setItem('family_memories', JSON.stringify(memories));
+    initDB().then(() => setIsDbReady(true)).catch(err => console.error("Không thể khởi tạo DB", err));
+  }, []);
+  
+  useEffect(() => {
+    // Chỉ lưu metadata vào localStorage
+    localStorage.setItem('family_memories_metadata', JSON.stringify(memories));
   }, [memories]);
 
   useEffect(() => {
     const savedLikedPosts = localStorage.getItem('family_liked_posts');
     if (savedLikedPosts) setLikedPosts(JSON.parse(savedLikedPosts));
+  }, []);
 
+  useEffect(() => {
     const savedUser = localStorage.getItem('family_app_user');
     if (savedUser) setCurrentUser(savedUser);
   }, []);
 
   useEffect(() => {
-    if (selectedMemory) setIsEditing(false);
+    setIsEditing(false);
   }, [selectedMemory?.id]);
 
 
   // --- CÁC HÀM XỬ LÝ (HANDLERS) ---
+  const handleDataLoaded = () => {
+    // Media loading callback
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
       setNewFile(file);
-      const reader = new FileReader();
-      reader.onloadend = () => setPreviewUrl(reader.result);
-      reader.readAsDataURL(file);
+      // Dọn dẹp previewUrl cũ nếu có
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+      // Dùng createObjectURL để xem trước, không đọc cả file vào bộ nhớ
+      const objectUrl = URL.createObjectURL(file);
+      setPreviewUrl(objectUrl);
     }
   };
 
-  const handleSaveMemory = () => {
-    if (!previewUrl) return alert("Vui lòng chọn ảnh hoặc video!");
-    const newMemory = {
-      id: Date.now(),
-      type: newFile?.type.startsWith('video') ? 'video' : 'image',
-      url: previewUrl,
+  const handleSaveMemory = async () => {
+    if (!newFile) return alert("Vui lòng chọn ảnh hoặc video!");
+    if (!isDbReady) return alert("Cơ sở dữ liệu chưa sẵn sàng, vui lòng thử lại sau giây lát.");
+    
+    let fileToSave = newFile;
+
+    // --- Bắt đầu nén ảnh ---
+    if (newFile.type.startsWith('image/')) {
+        try {
+            console.log(`Kích thước ảnh gốc: ${(newFile.size / 1024 / 1024).toFixed(2)} MB`);
+            const compressedBlob = await compressImage(newFile, {
+                quality: 0.85, // Chất lượng 85%
+                maxWidth: 1920, // Chiều rộng tối đa 1920px
+                maxHeight: 1920, // Chiều cao tối đa 1920px
+            });
+            // Tạo một đối tượng File mới từ Blob đã nén
+            fileToSave = new File([compressedBlob], newFile.name, {
+                type: compressedBlob.type,
+                lastModified: Date.now(),
+            });
+            console.log(`Kích thước ảnh đã nén: ${(fileToSave.size / 1024 / 1024).toFixed(2)} MB`);
+        } catch (error) {
+            console.error("Lỗi khi nén ảnh, sẽ lưu ảnh gốc:", error);
+            alert("Không thể nén ảnh, kỷ niệm sẽ được lưu với ảnh gốc.");
+            fileToSave = newFile; // Nếu lỗi, quay lại dùng file gốc
+        }
+    }
+    // --- Kết thúc nén ảnh ---
+
+    const newMemoryId = Date.now();
+    const newMemoryMetadata = {
+      id: newMemoryId,
+      type: fileToSave.type.startsWith('video') ? 'video' : fileToSave.type,
       caption: newCaption || 'Khoảnh khắc gia đình',
       family: newFamily,
       date: new Date().toISOString().split('T')[0],
       likes: 0,
       comments: []
     };
-    setMemories([newMemory, ...memories]);
-    setNewCaption(''); setNewFile(null); setPreviewUrl(''); setIsUploading(false); setNewFamily(FAMILIES[0]);
+
+    try {
+      await saveData(newMemoryId, fileToSave); // Lưu file đã nén (hoặc file gốc)
+      setMemories([newMemoryMetadata, ...memories]);
+      // Reset form
+      setNewCaption(''); 
+      setNewFile(null); 
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl); // Dọn dẹp URL xem trước
+      }
+      setPreviewUrl(''); 
+      setIsUploading(false); 
+      setNewFamily(FAMILIES[0]);
+
+    } catch (error) {
+      console.error("Lỗi khi lưu vào IndexedDB:", error);
+      alert("Đã xảy ra lỗi khi lưu kỷ niệm. Vui lòng thử lại.");
+    }
   };
 
   const handleLike = (id) => {
@@ -129,10 +307,16 @@ const App = () => {
     setNewComment('');
   };
 
-  const handleDelete = (id) => {
+  const handleDelete = async (id) => {
     if (window.confirm("Bạn có chắc chắn muốn xóa kỷ niệm này vĩnh viễn không?")) {
-      setMemories(memories.filter(mem => mem.id !== id));
-      setSelectedMemory(null);
+      try {
+        await deleteData(id);
+        setMemories(memories.filter(mem => mem.id !== id));
+        setSelectedMemory(null);
+      } catch (error) {
+        console.error("Lỗi khi xóa dữ liệu trong IndexedDB:", error);
+        alert("Xóa kỷ niệm thất bại. Vui lòng thử lại.");
+      }
     }
   };
 
@@ -152,7 +336,7 @@ const App = () => {
 
   const filteredMemories = memories.filter(mem => 
     (filterDate ? mem.date === filterDate : true) && 
-    (filterType === 'all' ? true : mem.type === filterType) &&
+    (filterType === 'all' ? true : mem.type.startsWith(filterType)) &&
     (filterFamily === 'all' ? true : mem.family === filterFamily)
   );
 
@@ -165,8 +349,9 @@ const App = () => {
             <h1 className="text-2xl md:text-3xl font-serif font-bold text-amber-800">Gia đình họ Đặng</h1>
             <p className="text-sm text-amber-700 italic">Ông Phiếm & Bà Dịu - Kỷ niệm còn mãi</p>
           </div>
-          <button onClick={() => setIsUploading(true)} className="flex items-center gap-2 bg-amber-800 text-amber-50 px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md">
+          <button onClick={() => setIsUploading(true)} className="flex items-center gap-2 bg-amber-800 text-amber-50 px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md" disabled={!isDbReady}>
             <Upload size={18} /><span>Tải lên kỷ niệm</span>
+            {!isDbReady && <Loader size={18} className="animate-spin" />}
           </button>
         </div>
       </header>
@@ -196,15 +381,7 @@ const App = () => {
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 md:gap-6">
             {filteredMemories.map((mem) => (
-              <div key={mem.id} className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg cursor-pointer shadow-sm hover:shadow-lg transition-all" onClick={() => setSelectedMemory(mem)}>
-                {mem.type === 'video' ? <video src={mem.url} className="w-full h-full object-cover" /> : <img src={mem.url} alt={mem.caption} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />}
-                <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4 text-white">
-                  <div className="flex items-center gap-1 font-bold"><Heart size={20} fill="white" /> {mem.likes}</div>
-                  <div className="flex items-center gap-1 font-bold"><MessageCircle size={20} /> {mem.comments.length}</div>
-                </div>
-                <div className="absolute top-2 right-2 text-white drop-shadow-md">{mem.type === 'video' ? <Video size={16} /> : <ImageIcon size={16} />}</div>
-                {mem.family && <div className="absolute bottom-2 left-2 text-white text-xs bg-black/50 px-1.5 py-0.5 rounded">{mem.family}</div>}
-              </div>
+              <MemoryItem key={mem.id} memory={mem} onSelect={setSelectedMemory} onDataLoaded={handleDataLoaded} />
             ))}
           </div>
         )}
@@ -233,7 +410,7 @@ const App = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm" onClick={() => setSelectedMemory(null)}>
           <div className="bg-white rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col md:flex-row shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex-1 bg-black flex items-center justify-center bg-amber-50/10">
-              {selectedMemory.type === 'video' ? <video src={selectedMemory.url} controls className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" /> : <img src={selectedMemory.url} alt="Detail" className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" />}
+              {selectedMemory.type.startsWith('video') ? <video src={selectedMemory.url} controls autoPlay className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" /> : <img src={selectedMemory.url} alt="Detail" className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" />}
             </div>
             <div className="w-full md:w-[350px] lg:w-[400px] flex flex-col bg-white border-l">
               <div className="p-4 border-b flex items-center justify-between">
