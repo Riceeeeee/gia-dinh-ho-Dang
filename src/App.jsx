@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Heart, MessageCircle, Upload, X, Calendar, Image as ImageIcon, Video, Search, Trash2, Pencil, Loader } from 'lucide-react';
-import { storage, db } from './firebase';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { db } from './firebase';
 import { collection, addDoc, query, onSnapshot, updateDoc, deleteDoc, doc, orderBy } from 'firebase/firestore';
 
 /**
@@ -25,13 +24,13 @@ const FAMILIES = [
 ];
 
 /**
- * Nén một tệp hình ảnh bằng Canvas API.
+ * Nén một tệp hình ảnh bằng Canvas API và trả về Base64.
  * @param {File} file Tệp hình ảnh cần nén.
  * @param {object} options Tùy chọn nén.
  * @param {number} options.quality Chất lượng ảnh (0 đến 1).
  * @param {number} options.maxWidth Chiều rộng tối đa.
  * @param {number} options.maxHeight Chiều cao tối đa.
- * @returns {Promise<Blob>} Một promise trả về ảnh đã nén dưới dạng Blob.
+ * @returns {Promise<string>} Một promise trả về ảnh đã nén dưới dạng Base64.
  */
 const compressImage = (file, options = {}) => {
   return new Promise((resolve, reject) => {
@@ -64,17 +63,9 @@ const compressImage = (file, options = {}) => {
         
         ctx.drawImage(img, 0, 0, width, height);
 
-        canvas.toBlob(
-          (blob) => {
-            if (blob) {
-              resolve(blob);
-            } else {
-              reject(new Error('Nén ảnh thất bại.'));
-            }
-          },
-          file.type, // Giữ nguyên định dạng ảnh (jpeg, png,...)
-          quality
-        );
+        // Trả về Base64 thay vì Blob
+        const base64 = canvas.toDataURL(file.type, quality);
+        resolve(base64);
       };
       
       img.onerror = (error) => reject(error);
@@ -204,51 +195,44 @@ const App = () => {
   const handleSaveMemory = async () => {
     if (!newFile) return alert("Vui lòng chọn ảnh hoặc video!");
     
-    let fileToSave = newFile;
-
-    // --- Bắt đầu nén ảnh ---
-    if (newFile.type.startsWith('image/')) {
-        try {
-            console.log(`Kích thước ảnh gốc: ${(newFile.size / 1024 / 1024).toFixed(2)} MB`);
-            const compressedBlob = await compressImage(newFile, {
-                quality: 0.85,
-                maxWidth: 1920,
-                maxHeight: 1920,
-            });
-            fileToSave = new File([compressedBlob], newFile.name, {
-                type: compressedBlob.type,
-                lastModified: Date.now(),
-            });
-            console.log(`Kích thước ảnh đã nén: ${(fileToSave.size / 1024 / 1024).toFixed(2)} MB`);
-        } catch (error) {
-            console.error("Lỗi khi nén ảnh, sẽ lưu ảnh gốc:", error);
-            fileToSave = newFile;
-        }
-    }
-    // --- Kết thúc nén ảnh ---
-
     try {
       setIsUploading(true);
 
-      // Upload file lên Firebase Storage
-      const timestamp = Date.now();
-      const storagePath = `memories/${timestamp}/${fileToSave.name}`;
-      const storageRef = ref(storage, storagePath);
-      
-      await uploadBytes(storageRef, fileToSave);
-      const imageUrl = await getDownloadURL(storageRef);
+      let imageBase64 = null;
 
-      // Lưu metadata lên Firestore
+      // --- Nén ảnh và chuyển thành Base64 ---
+      if (newFile.type.startsWith('image/')) {
+        try {
+          console.log(`Kích thước ảnh gốc: ${(newFile.size / 1024 / 1024).toFixed(2)} MB`);
+          imageBase64 = await compressImage(newFile, {
+            quality: 0.85,
+            maxWidth: 1920,
+            maxHeight: 1920,
+          });
+          console.log(`Base64 length: ${imageBase64.length} ký tự`);
+        } catch (error) {
+          console.error("Lỗi khi nén ảnh:", error);
+          alert("Không thể nén ảnh. Vui lòng thử lại.");
+          setIsUploading(false);
+          return;
+        }
+      } else if (newFile.type.startsWith('video/')) {
+        // Cho video, lưu trực tiếp (nếu nhỏ) hoặc bỏ qua
+        alert("Video hiện chưa hỗ trợ. Vui lòng chỉ tải ảnh lên.");
+        setIsUploading(false);
+        return;
+      }
+
+      // Lưu metadata + Base64 vào Firestore
       await addDoc(collection(db, 'memories'), {
-        type: fileToSave.type.startsWith('video') ? 'video' : fileToSave.type,
+        type: newFile.type,
         caption: newCaption || 'Khoảnh khắc gia đình',
         family: newFamily,
         date: new Date().toISOString().split('T')[0],
-        imageUrl: imageUrl,
+        imageUrl: imageBase64, // Lưu Base64 trực tiếp
         likes: 0,
         comments: [],
         createdAt: new Date(),
-        storagePath: storagePath
       });
 
       // Reset form
@@ -260,9 +244,10 @@ const App = () => {
       setPreviewUrl('');
       setIsUploading(false);
       setNewFamily(FAMILIES[0]);
+      alert("Kỷ niệm đã được lưu thành công!");
 
     } catch (error) {
-      console.error("Lỗi khi lưu vào Firebase:", error);
+      console.error("Lỗi khi lưu vào Firestore:", error);
       alert("Đã xảy ra lỗi khi lưu kỷ niệm. Vui lòng thử lại.");
       setIsUploading(false);
     }
@@ -317,19 +302,11 @@ const App = () => {
   const handleDelete = async (id) => {
     if (window.confirm("Bạn có chắc chắn muốn xóa kỷ niệm này vĩnh viễn không?")) {
       try {
-        const memory = memories.find(m => m.id === id);
-        
-        // Xóa ảnh/video từ Firebase Storage
-        if (memory.storagePath) {
-          const fileRef = ref(storage, memory.storagePath);
-          await deleteObject(fileRef);
-        }
-        
         // Xóa metadata từ Firestore
         await deleteDoc(doc(db, 'memories', id));
         setSelectedMemory(null);
       } catch (error) {
-        console.error("Lỗi khi xóa dữ liệu trong Firebase:", error);
+        console.error("Lỗi khi xóa dữ liệu trong Firestore:", error);
         alert("Xóa kỷ niệm thất bại. Vui lòng thử lại.");
       }
     }
