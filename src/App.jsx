@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Heart, MessageCircle, Upload, X, Trash2, Pencil, Loader } from 'lucide-react';
-import { loadMemories, saveMemories, getGistId, createMemoriesGist, setGitHubToken } from './gistService';
+import { Heart, MessageCircle, Upload, X, Trash2, Pencil, Loader, Image as ImageIcon } from 'lucide-react';
+import { loadMemories, saveMemory, updateMemory, deleteMemory, subscribeToMemories } from './firestoreService';
 
 const FAMILIES = [
   "Chung",
@@ -54,39 +54,45 @@ function App() {
   const [likedPosts, setLikedPosts] = useState([]);
   const [isEditing, setIsEditing] = useState(false);
   const [editingCaption, setEditingCaption] = useState('');
-  const [showTokenModal, setShowTokenModal] = useState(false);
-  const [tokenInput, setTokenInput] = useState('');
   const fileInputRef = useRef(null);
 
-  // Load từ GitHub Gist
+  // Load từ Firestore và subscribe real-time updates
   useEffect(() => {
-    const loadData = async () => {
-      const token = localStorage.getItem('github_token');
-      if (!token) {
-        setShowTokenModal(true);
-        setLoading(false);
-        return;
-      }
+    let unsubscribe = null;
 
+    const setupData = async () => {
       try {
-        console.log('🔄 Loading from GitHub Gist...');
+        console.log('🔄 Loading from Firestore...');
+        // Load initial data
         const mems = await loadMemories();
         setMemories(mems);
         setLoading(false);
-        console.log('✅ Gist ID:', getGistId());
+        console.log('✅ Loaded memories from Firestore');
+
+        // Subscribe to real-time updates
+        unsubscribe = subscribeToMemories((updatedMemories) => {
+          setMemories(updatedMemories);
+        });
       } catch (error) {
         console.error('❌ Load error:', error);
         setLoading(false);
       }
     };
 
-    loadData();
+    setupData();
 
     const savedLikedPosts = localStorage.getItem('family_liked_posts');
     if (savedLikedPosts) setLikedPosts(JSON.parse(savedLikedPosts));
 
     const savedUser = localStorage.getItem('family_app_user');
     if (savedUser) setCurrentUser(savedUser);
+
+    // Cleanup subscription on unmount
+    return () => {
+      if (unsubscribe) {
+        unsubscribe();
+      }
+    };
   }, []);
 
   // Xử lý upload
@@ -111,13 +117,13 @@ function App() {
         image: previewUrl,
         likes: 0,
         comments: [],
+        createdAt: new Date().toISOString(),
       };
       
+      await saveMemory(newMemory);
       const updatedMemories = [newMemory, ...memories];
-      await saveMemories(updatedMemories);
-      
       setMemories(updatedMemories);
-      console.log('✅ Image saved to Gist!');
+      console.log('✅ Image saved to Firestore!');
       setNewCaption('');
       setPreviewUrl('');
       setIsUploading(false);
@@ -134,11 +140,15 @@ function App() {
     if (likedPosts.includes(id)) return;
     
     try {
-      const updatedMemories = memories.map(m => 
-        m.id === id ? { ...m, likes: (m.likes || 0) + 1 } : m
-      );
-      await saveMemories(updatedMemories);
+      const memory = memories.find(m => m.id === id);
+      if (!memory) return;
       
+      const updatedMemory = { ...memory, likes: (memory.likes || 0) + 1 };
+      await updateMemory(id, { likes: updatedMemory.likes });
+      
+      const updatedMemories = memories.map(m => 
+        m.id === id ? updatedMemory : m
+      );
       setMemories(updatedMemories);
       const newLikedPosts = [...likedPosts, id];
       setLikedPosts(newLikedPosts);
@@ -161,13 +171,14 @@ function App() {
 
     try {
       const comment = { author, text: newComment, time: new Date().toLocaleDateString('vi-VN') };
+      const updatedComments = [...(selectedMemory.comments || []), comment];
+      await updateMemory(selectedMemory.id, { comments: updatedComments });
+      
       const updatedMemories = memories.map(m => 
         m.id === selectedMemory.id 
-          ? { ...m, comments: [...(m.comments || []), comment] }
+          ? { ...m, comments: updatedComments }
           : m
       );
-      await saveMemories(updatedMemories);
-      
       setMemories(updatedMemories);
       const updatedMemory = updatedMemories.find(m => m.id === selectedMemory.id);
       setSelectedMemory(updatedMemory);
@@ -181,13 +192,13 @@ function App() {
     if (!window.confirm('Xóa kỷ niệm này?')) return;
     
     try {
+      await deleteMemory(id);
       const updatedMemories = memories.filter(m => m.id !== id);
-      await saveMemories(updatedMemories);
-      
       setMemories(updatedMemories);
       setSelectedMemory(null);
     } catch (error) {
       console.error('Delete error:', error);
+      alert('Lỗi khi xóa kỷ niệm: ' + error.message);
     }
   };
 
@@ -195,62 +206,83 @@ function App() {
     if (!selectedMemory) return;
     
     try {
+      await updateMemory(selectedMemory.id, { caption: editingCaption });
       const updatedMemories = memories.map(m => 
         m.id === selectedMemory.id 
           ? { ...m, caption: editingCaption }
           : m
       );
-      await saveMemories(updatedMemories);
-      
       setMemories(updatedMemories);
       const updatedMemory = updatedMemories.find(m => m.id === selectedMemory.id);
       setSelectedMemory(updatedMemory);
       setIsEditing(false);
     } catch (error) {
       console.error('Update error:', error);
+      alert('Lỗi khi cập nhật: ' + error.message);
     }
-  };
-
-  const handleTokenSubmit = (e) => {
-    e.preventDefault();
-    if (!tokenInput.trim()) {
-      alert('Vui lòng nhập GitHub token');
-      return;
-    }
-    setGitHubToken(tokenInput);
-    setShowTokenModal(false);
-    window.location.reload();
   };
 
   return (
-    <div className="min-h-screen bg-amber-50 font-sans text-amber-900 pb-20">
-      <header className="bg-amber-100/80 backdrop-blur-md sticky top-0 z-10 border-b border-amber-200 shadow-sm">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex flex-col md:flex-row justify-between items-center gap-4">
-          <div className="text-center md:text-left">
-            <h1 className="text-2xl md:text-3xl font-serif font-bold text-amber-800">Gia đình họ Đặng</h1>
-            <p className="text-sm text-amber-700 italic">Ông Phiếm & Bà Dịu - Kỷ niệm còn mãi</p>
+    <div className="min-h-screen bg-gradient-to-br from-amber-50 via-orange-50 to-amber-100 font-sans text-amber-900 pb-20">
+      <header className="bg-amber-100/90 backdrop-blur-md sticky top-0 z-10 border-b border-amber-200 shadow-md">
+        <div className="max-w-6xl mx-auto px-3 sm:px-4 py-3 sm:py-4 flex flex-col sm:flex-row justify-between items-center gap-3 sm:gap-4">
+          <div className="text-center sm:text-left">
+            <h1 className="text-xl sm:text-2xl md:text-3xl font-serif font-bold text-amber-800">Gia đình họ Đặng</h1>
+            <p className="text-xs sm:text-sm text-amber-700 italic">Ông Phiếm & Bà Dịu - Kỷ niệm còn mãi</p>
           </div>
-          <button onClick={() => setIsUploading(true)} className="flex items-center gap-2 bg-amber-800 text-amber-50 px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md">
-            <Upload size={18} /><span>Tải lên kỷ niệm</span>
+          <button 
+            onClick={() => setIsUploading(true)} 
+            className="flex items-center gap-2 bg-amber-800 text-amber-50 px-4 sm:px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md text-sm sm:text-base w-full sm:w-auto justify-center"
+          >
+            <Upload size={18} /><span className="hidden sm:inline">Tải lên kỷ niệm</span><span className="sm:hidden">Đăng ảnh</span>
           </button>
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 py-6">
+      <main className="max-w-6xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
         {loading ? (
-          <div className="text-center py-20 text-amber-400"><Loader className="animate-spin mx-auto mb-4" /><p>Đang tải kỷ niệm...</p></div>
+          <div className="text-center py-20 text-amber-400">
+            <Loader className="animate-spin mx-auto mb-4" size={48} />
+            <p className="text-base sm:text-lg">Đang tải kỷ niệm...</p>
+          </div>
         ) : memories.length === 0 ? (
-          <div className="text-center py-20 text-amber-400"><p className="text-xl">Chưa có kỷ niệm nào...</p></div>
+          <div className="text-center py-20">
+            <ImageIcon className="mx-auto mb-4 text-amber-300" size={64} />
+            <p className="text-lg sm:text-xl text-amber-400 mb-4">Chưa có kỷ niệm nào...</p>
+            <button 
+              onClick={() => setIsUploading(true)}
+              className="bg-amber-800 text-amber-50 px-6 py-3 rounded-full hover:bg-amber-900 transition-colors shadow-md"
+            >
+              Đăng ảnh đầu tiên
+            </button>
+          </div>
         ) : (
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2 sm:gap-3 md:gap-4">
             {memories.map((mem) => (
-              <div key={mem.id} className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg cursor-pointer shadow-sm hover:shadow-lg transition-all" onClick={() => setSelectedMemory(mem)}>
-                <img src={mem.imageUrl} alt={mem.caption} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" />
-                <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4 text-white">
-                  <div className="flex items-center gap-1 font-bold"><Heart size={20} fill="white" /> {mem.likes || 0}</div>
-                  <div className="flex items-center gap-1 font-bold"><MessageCircle size={20} /> {mem.comments?.length || 0}</div>
+              <div 
+                key={mem.id} 
+                className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg sm:rounded-xl cursor-pointer shadow-md hover:shadow-xl transition-all transform hover:scale-[1.02] active:scale-[0.98]" 
+                onClick={() => setSelectedMemory(mem)}
+              >
+                <img 
+                  src={mem.image} 
+                  alt={mem.caption} 
+                  className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500" 
+                  loading="lazy"
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-black/0 to-black/0 opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-center pb-2 gap-4 text-white">
+                  <div className="flex items-center gap-1 font-bold text-sm sm:text-base">
+                    <Heart size={18} fill="white" /> {mem.likes || 0}
+                  </div>
+                  <div className="flex items-center gap-1 font-bold text-sm sm:text-base">
+                    <MessageCircle size={18} /> {mem.comments?.length || 0}
+                  </div>
                 </div>
-                {mem.family && <div className="absolute bottom-2 left-2 text-white text-xs bg-black/50 px-1.5 py-0.5 rounded">{mem.family}</div>}
+                {mem.family && (
+                  <div className="absolute bottom-2 left-2 text-white text-[10px] sm:text-xs bg-black/60 backdrop-blur-sm px-2 py-1 rounded-full font-medium">
+                    {mem.family}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -258,89 +290,196 @@ function App() {
       </main>
 
       {isUploading && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl">
-            <div className="p-4 border-b flex justify-between items-center bg-amber-50">
-              <h3 className="font-serif font-bold text-amber-900">Thêm kỷ niệm mới</h3>
-              <button onClick={() => setIsUploading(false)} className="text-amber-500 hover:text-amber-800"><X size={24} /></button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl sm:rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl my-auto">
+            <div className="p-3 sm:p-4 border-b flex justify-between items-center bg-gradient-to-r from-amber-50 to-orange-50">
+              <h3 className="font-serif font-bold text-amber-900 text-base sm:text-lg">Thêm kỷ niệm mới</h3>
+              <button 
+                onClick={() => {
+                  setIsUploading(false);
+                  setPreviewUrl('');
+                  setNewCaption('');
+                }} 
+                className="text-amber-500 hover:text-amber-800 p-1 hover:bg-amber-100 rounded-full transition-colors"
+              >
+                <X size={24} />
+              </button>
             </div>
-            <div className="p-6 space-y-4">
-              <div className="border-2 border-dashed border-amber-300 rounded-xl p-8 text-center cursor-pointer hover:bg-amber-50" onClick={() => fileInputRef.current.click()}>
-                {previewUrl ? <img src={previewUrl} alt="Preview" className="max-h-60 mx-auto rounded-lg" /> : <div className="flex flex-col items-center text-amber-400"><Upload size={48} className="mb-2" /><p>Nhấn để chọn ảnh</p></div>}
-                <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept="image/*" className="hidden" />
+            <div className="p-4 sm:p-6 space-y-3 sm:space-y-4 max-h-[90vh] overflow-y-auto">
+              <div 
+                className="border-2 border-dashed border-amber-300 rounded-xl p-6 sm:p-8 text-center cursor-pointer hover:bg-amber-50 transition-colors active:bg-amber-100" 
+                onClick={() => fileInputRef.current?.click()}
+              >
+                {previewUrl ? (
+                  <img src={previewUrl} alt="Preview" className="max-h-48 sm:max-h-60 mx-auto rounded-lg shadow-md" />
+                ) : (
+                  <div className="flex flex-col items-center text-amber-400">
+                    <Upload size={40} className="mb-2 sm:mb-3" />
+                    <p className="text-sm sm:text-base">Nhấn để chọn ảnh</p>
+                    <p className="text-xs text-amber-300 mt-1">JPG, PNG, WEBP</p>
+                  </div>
+                )}
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  onChange={handleFileUpload} 
+                  accept="image/*" 
+                  className="hidden" 
+                />
               </div>
-              <select value={newFamily} onChange={(e) => setNewFamily(e.target.value)} className="w-full p-3 bg-gray-50 rounded-lg border focus:ring-2 focus:ring-amber-500">
+              <select 
+                value={newFamily} 
+                onChange={(e) => setNewFamily(e.target.value)} 
+                className="w-full p-2.5 sm:p-3 bg-gray-50 rounded-lg border border-amber-200 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 text-sm sm:text-base"
+              >
                 {FAMILIES.map(f => <option key={f} value={f}>{f}</option>)}
               </select>
-              <textarea placeholder="Viết đôi dòng..." className="w-full p-3 bg-gray-50 rounded-lg border focus:ring-2 focus:ring-amber-500" rows="3" value={newCaption} onChange={(e) => setNewCaption(e.target.value)}></textarea>
-              <button onClick={handleSaveMemory} disabled={isUploading} className="w-full bg-amber-800 text-white py-3 rounded-xl font-bold hover:bg-amber-900 disabled:opacity-50">{isUploading ? 'Đang lưu...' : 'Đăng tải'}</button>
+              <textarea 
+                placeholder="Viết đôi dòng về kỷ niệm này..." 
+                className="w-full p-2.5 sm:p-3 bg-gray-50 rounded-lg border border-amber-200 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 resize-none text-sm sm:text-base" 
+                rows="3" 
+                value={newCaption} 
+                onChange={(e) => setNewCaption(e.target.value)}
+              ></textarea>
+              <button 
+                onClick={handleSaveMemory} 
+                disabled={isUploading || !previewUrl} 
+                className="w-full bg-amber-800 text-white py-2.5 sm:py-3 rounded-xl font-bold hover:bg-amber-900 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm sm:text-base shadow-md"
+              >
+                {isUploading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader className="animate-spin" size={18} />
+                    Đang lưu...
+                  </span>
+                ) : (
+                  'Đăng tải'
+                )}
+              </button>
             </div>
           </div>
         </div>
       )}
 
       {selectedMemory && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" onClick={() => setSelectedMemory(null)}>
-          <div className="bg-white rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col md:flex-row shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <div className="flex-1 bg-black flex items-center justify-center">
-              <img src={selectedMemory.imageUrl} alt="Detail" className="max-h-[90vh] w-full object-contain" />
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm p-0 sm:p-4 overflow-y-auto" onClick={() => setSelectedMemory(null)}>
+          <div className="bg-white rounded-none sm:rounded-xl w-full max-w-5xl max-h-[100vh] sm:max-h-[90vh] overflow-hidden flex flex-col md:flex-row shadow-2xl my-0 sm:my-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="flex-1 bg-black flex items-center justify-center min-h-[40vh] sm:min-h-[50vh] md:min-h-0">
+              <img src={selectedMemory.image} alt="Detail" className="max-h-[50vh] sm:max-h-[70vh] md:max-h-[90vh] w-full object-contain" />
             </div>
-            <div className="w-full md:w-[350px] lg:w-[400px] flex flex-col bg-white border-l">
-              <div className="p-4 border-b flex items-center justify-between">
-                <div>
-                  <p className="font-bold text-sm text-gray-800">{selectedMemory.family || 'Chung'}</p>
+            <div className="w-full md:w-[350px] lg:w-[400px] flex flex-col bg-white border-t md:border-t-0 md:border-l max-h-[50vh] sm:max-h-[70vh] md:max-h-[90vh]">
+              <div className="p-3 sm:p-4 border-b flex items-center justify-between bg-gradient-to-r from-amber-50 to-orange-50 sticky top-0 z-10">
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-sm sm:text-base text-gray-800 truncate">{selectedMemory.family || 'Chung'}</p>
                   <p className="text-xs text-gray-500">{selectedMemory.date}</p>
                 </div>
-                <div className="flex items-center gap-1">
-                  <button onClick={() => { setIsEditing(true); setEditingCaption(selectedMemory.caption); }} className="text-blue-500 hover:text-blue-700 p-2"><Pencil size={18} /></button>
-                  <button onClick={() => handleDelete(selectedMemory.id)} className="text-red-500 hover:text-red-700 p-2"><Trash2 size={18} /></button>
-                  <button onClick={() => setSelectedMemory(null)} className="text-gray-500 hover:text-gray-800 p-2"><X size={20} /></button>
+                <div className="flex items-center gap-0.5 sm:gap-1 flex-shrink-0 ml-2">
+                  <button 
+                    onClick={() => { setIsEditing(true); setEditingCaption(selectedMemory.caption); }} 
+                    className="text-blue-500 hover:text-blue-700 p-1.5 sm:p-2 hover:bg-blue-50 rounded transition-colors"
+                    title="Chỉnh sửa"
+                  >
+                    <Pencil size={16} className="sm:w-[18px] sm:h-[18px]" />
+                  </button>
+                  <button 
+                    onClick={() => handleDelete(selectedMemory.id)} 
+                    className="text-red-500 hover:text-red-700 p-1.5 sm:p-2 hover:bg-red-50 rounded transition-colors"
+                    title="Xóa"
+                  >
+                    <Trash2 size={16} className="sm:w-[18px] sm:h-[18px]" />
+                  </button>
+                  <button 
+                    onClick={() => setSelectedMemory(null)} 
+                    className="text-gray-500 hover:text-gray-800 p-1.5 sm:p-2 hover:bg-gray-100 rounded transition-colors"
+                    title="Đóng"
+                  >
+                    <X size={18} className="sm:w-[20px] sm:h-[20px]" />
+                  </button>
                 </div>
               </div>
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                <div className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-amber-100 flex-shrink-0 flex items-center justify-center text-xs">GĐ</div>
-                  <div className="text-sm w-full">
+              <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
+                <div className="flex gap-2 sm:gap-3">
+                  <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-amber-200 to-orange-200 flex-shrink-0 flex items-center justify-center text-xs sm:text-sm font-bold text-amber-800">GĐ</div>
+                  <div className="text-sm sm:text-base w-full min-w-0">
                     {isEditing ? (
                       <div className="flex flex-col gap-2">
-                        <textarea value={editingCaption} onChange={(e) => setEditingCaption(e.target.value)} className="w-full p-2 border rounded-md text-sm" rows="3"></textarea>
+                        <textarea 
+                          value={editingCaption} 
+                          onChange={(e) => setEditingCaption(e.target.value)} 
+                          className="w-full p-2 border border-amber-200 rounded-md text-sm sm:text-base focus:ring-2 focus:ring-amber-500 focus:border-amber-500 resize-none" 
+                          rows="3"
+                        ></textarea>
                         <div className="flex justify-end gap-2">
-                          <button onClick={() => setIsEditing(false)} className="text-xs px-3 py-1 rounded bg-gray-200 hover:bg-gray-300">Hủy</button>
-                          <button onClick={handleUpdateCaption} className="text-xs px-3 py-1 rounded bg-amber-600 text-white hover:bg-amber-700">Lưu</button>
+                          <button 
+                            onClick={() => setIsEditing(false)} 
+                            className="text-xs sm:text-sm px-3 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300 transition-colors"
+                          >
+                            Hủy
+                          </button>
+                          <button 
+                            onClick={handleUpdateCaption} 
+                            className="text-xs sm:text-sm px-3 py-1.5 rounded-lg bg-amber-600 text-white hover:bg-amber-700 transition-colors"
+                          >
+                            Lưu
+                          </button>
                         </div>
                       </div>
                     ) : (
-                      <p className="text-gray-700">{selectedMemory.caption}</p>
+                      <p className="text-gray-700 break-words">{selectedMemory.caption}</p>
                     )}
                   </div>
                 </div>
                 
-                {selectedMemory.comments && selectedMemory.comments.map((cmt, idx) => (
-                  <div key={idx} className="flex gap-3">
-                    <div className="w-8 h-8 rounded-full bg-gray-200 flex-shrink-0 flex items-center justify-center text-sm font-semibold text-gray-600">
-                      {cmt.author?.charAt(0).toUpperCase() || '?'}
-                    </div>
-                    <div className="text-sm w-full">
-                      <div className="bg-gray-100 p-2 rounded-lg">
-                        <p className="font-bold text-xs text-amber-800">{cmt.author}</p>
-                        <p className="text-gray-700">{cmt.text}</p>
+                {selectedMemory.comments && selectedMemory.comments.length > 0 && (
+                  <div className="space-y-2 sm:space-y-3">
+                    {selectedMemory.comments.map((cmt, idx) => (
+                      <div key={idx} className="flex gap-2 sm:gap-3">
+                        <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-full bg-gradient-to-br from-gray-200 to-gray-300 flex-shrink-0 flex items-center justify-center text-xs sm:text-sm font-semibold text-gray-600">
+                          {cmt.author?.charAt(0).toUpperCase() || '?'}
+                        </div>
+                        <div className="text-sm sm:text-base w-full min-w-0">
+                          <div className="bg-gray-100 p-2 sm:p-3 rounded-lg">
+                            <p className="font-bold text-xs sm:text-sm text-amber-800 mb-1">{cmt.author}</p>
+                            <p className="text-gray-700 break-words">{cmt.text}</p>
+                          </div>
+                          <span className="text-[10px] sm:text-xs text-gray-400">{cmt.time}</span>
+                        </div>
                       </div>
-                      <span className="text-[10px] text-gray-400">{cmt.time}</span>
-                    </div>
+                    ))}
                   </div>
-                ))}
+                )}
               </div>
-              <div className="p-4 border-t bg-gray-50">
-                <div className="flex items-center gap-4 mb-3">
-                  <button onClick={() => handleLike(selectedMemory.id)} disabled={likedPosts.includes(selectedMemory.id)} className="group disabled:cursor-not-allowed">
-                    <Heart className={likedPosts.includes(selectedMemory.id) ? 'text-red-500 fill-red-500' : 'text-gray-400 group-hover:text-red-400'} />
+              <div className="p-3 sm:p-4 border-t bg-gradient-to-r from-gray-50 to-amber-50 sticky bottom-0">
+                <div className="flex items-center gap-3 sm:gap-4 mb-2 sm:mb-3">
+                  <button 
+                    onClick={() => handleLike(selectedMemory.id)} 
+                    disabled={likedPosts.includes(selectedMemory.id)} 
+                    className="group disabled:cursor-not-allowed p-1 hover:bg-red-50 rounded-full transition-colors"
+                    title="Thích"
+                  >
+                    <Heart 
+                      size={20} 
+                      className={likedPosts.includes(selectedMemory.id) ? 'text-red-500 fill-red-500' : 'text-gray-400 group-hover:text-red-400 transition-colors'} 
+                    />
                   </button>
-                  <MessageCircle className="text-gray-400" />
+                  <MessageCircle className="text-gray-400" size={20} />
                 </div>
-                <p className="font-bold text-sm text-gray-800 mb-2">{selectedMemory.likes || 0} lượt thích</p>
+                <p className="font-bold text-xs sm:text-sm text-gray-800 mb-2 sm:mb-3">{selectedMemory.likes || 0} lượt thích</p>
                 <div className="flex gap-2">
-                  <input type="text" placeholder="Thêm bình luận..." className="flex-1 text-sm bg-white border rounded-full px-4 py-2 focus:outline-none focus:border-amber-400" value={newComment} onChange={(e) => setNewComment(e.target.value)} onKeyPress={(e) => e.key === 'Enter' && handleAddComment()} />
-                  <button onClick={handleAddComment} className="text-amber-600 font-bold text-sm hover:text-amber-800" disabled={!newComment.trim()}>Đăng</button>
+                  <input 
+                    type="text" 
+                    placeholder="Thêm bình luận..." 
+                    className="flex-1 text-xs sm:text-sm bg-white border border-amber-200 rounded-full px-3 sm:px-4 py-1.5 sm:py-2 focus:outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100" 
+                    value={newComment} 
+                    onChange={(e) => setNewComment(e.target.value)} 
+                    onKeyPress={(e) => e.key === 'Enter' && handleAddComment()} 
+                  />
+                  <button 
+                    onClick={handleAddComment} 
+                    className="text-amber-600 font-bold text-xs sm:text-sm hover:text-amber-800 px-3 sm:px-4 py-1.5 sm:py-2 hover:bg-amber-50 rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed" 
+                    disabled={!newComment.trim()}
+                  >
+                    Đăng
+                  </button>
                 </div>
               </div>
             </div>
@@ -348,35 +487,6 @@ function App() {
         </div>
       )}
 
-      {/* Token Modal */}
-      {showTokenModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
-            <h2 className="text-2xl font-bold text-amber-800 mb-2">Cấu hình GitHub Token</h2>
-            <p className="text-amber-700 mb-6 text-sm">Bạn cần cung cấp GitHub Personal Access Token (scope: gist) để có thể lưu kỷ niệm.</p>
-            
-            <form onSubmit={handleTokenSubmit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-semibold text-amber-800 mb-2">GitHub Token</label>
-                <input 
-                  type="password" 
-                  placeholder="ghp_..." 
-                  value={tokenInput}
-                  onChange={(e) => setTokenInput(e.target.value)}
-                  className="w-full px-4 py-2 border border-amber-200 rounded-lg focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
-                />
-                <p className="text-xs text-amber-600 mt-2">
-                  📍 Tạo token: <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-800">github.com/settings/tokens</a>
-                </p>
-              </div>
-              
-              <button type="submit" className="w-full bg-amber-600 text-white py-2 rounded-lg font-bold hover:bg-amber-700 transition">
-                Lưu Token
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
