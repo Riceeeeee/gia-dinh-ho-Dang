@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Heart, MessageCircle, Upload, X, Trash2, Pencil, Loader } from 'lucide-react';
-import { db } from './firebase';
-import { collection, addDoc, query, onSnapshot, updateDoc, deleteDoc, doc } from 'firebase/firestore';
+import { loadMemories, saveMemories, getGistId, createMemoriesGist } from './gistService';
 
 const FAMILIES = [
   "Chung",
@@ -57,30 +56,28 @@ function App() {
   const [editingCaption, setEditingCaption] = useState('');
   const fileInputRef = useRef(null);
 
-  // Load từ Firestore
+  // Load từ GitHub Gist
   useEffect(() => {
-    console.log('🔄 Connecting to Firestore...');
-    const q = query(collection(db, 'memories'));
-    
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      console.log(`📸 Got ${snapshot.docs.length} memories`);
-      const docs = snapshot.docs
-        .map(doc => ({ id: doc.id, ...doc.data() }))
-        .sort((a, b) => new Date(b.date) - new Date(a.date));
-      setMemories(docs);
-      setLoading(false);
-    }, (error) => {
-      console.error('❌ Firestore error:', error);
-      setLoading(false);
-    });
+    const loadData = async () => {
+      try {
+        console.log('🔄 Loading from GitHub Gist...');
+        const mems = await loadMemories();
+        setMemories(mems);
+        setLoading(false);
+        console.log('✅ Gist ID:', getGistId());
+      } catch (error) {
+        console.error('❌ Load error:', error);
+        setLoading(false);
+      }
+    };
+
+    loadData();
 
     const savedLikedPosts = localStorage.getItem('family_liked_posts');
     if (savedLikedPosts) setLikedPosts(JSON.parse(savedLikedPosts));
 
     const savedUser = localStorage.getItem('family_app_user');
     if (savedUser) setCurrentUser(savedUser);
-
-    return () => unsubscribe();
   }, []);
 
   // Xử lý upload
@@ -97,15 +94,21 @@ function App() {
 
     try {
       setIsUploading(true);
-      await addDoc(collection(db, 'memories'), {
+      const newMemory = {
+        id: Date.now().toString(),
         caption: newCaption || 'Khoảnh khắc gia đình',
         family: newFamily,
         date: new Date().toISOString().split('T')[0],
-        imageUrl: previewUrl,
+        image: previewUrl,
         likes: 0,
         comments: [],
-      });
-      console.log('✅ Image uploaded!');
+      };
+      
+      const updatedMemories = [newMemory, ...memories];
+      await saveMemories(updatedMemories);
+      
+      setMemories(updatedMemories);
+      console.log('✅ Image saved to Gist!');
       setNewCaption('');
       setPreviewUrl('');
       setIsUploading(false);
@@ -122,11 +125,12 @@ function App() {
     if (likedPosts.includes(id)) return;
     
     try {
-      const memory = memories.find(m => m.id === id);
-      await updateDoc(doc(db, 'memories', id), {
-        likes: (memory.likes || 0) + 1
-      });
+      const updatedMemories = memories.map(m => 
+        m.id === id ? { ...m, likes: (m.likes || 0) + 1 } : m
+      );
+      await saveMemories(updatedMemories);
       
+      setMemories(updatedMemories);
       const newLikedPosts = [...likedPosts, id];
       setLikedPosts(newLikedPosts);
       localStorage.setItem('family_liked_posts', JSON.stringify(newLikedPosts));
@@ -148,10 +152,16 @@ function App() {
 
     try {
       const comment = { author, text: newComment, time: new Date().toLocaleDateString('vi-VN') };
-      const updated = [...(selectedMemory.comments || []), comment];
-      await updateDoc(doc(db, 'memories', selectedMemory.id), {
-        comments: updated
-      });
+      const updatedMemories = memories.map(m => 
+        m.id === selectedMemory.id 
+          ? { ...m, comments: [...(m.comments || []), comment] }
+          : m
+      );
+      await saveMemories(updatedMemories);
+      
+      setMemories(updatedMemories);
+      const updatedMemory = updatedMemories.find(m => m.id === selectedMemory.id);
+      setSelectedMemory(updatedMemory);
       setNewComment('');
     } catch (error) {
       console.error('Comment error:', error);
@@ -162,7 +172,10 @@ function App() {
     if (!window.confirm('Xóa kỷ niệm này?')) return;
     
     try {
-      await deleteDoc(doc(db, 'memories', id));
+      const updatedMemories = memories.filter(m => m.id !== id);
+      await saveMemories(updatedMemories);
+      
+      setMemories(updatedMemories);
       setSelectedMemory(null);
     } catch (error) {
       console.error('Delete error:', error);
@@ -173,9 +186,16 @@ function App() {
     if (!selectedMemory) return;
     
     try {
-      await updateDoc(doc(db, 'memories', selectedMemory.id), {
-        caption: editingCaption
-      });
+      const updatedMemories = memories.map(m => 
+        m.id === selectedMemory.id 
+          ? { ...m, caption: editingCaption }
+          : m
+      );
+      await saveMemories(updatedMemories);
+      
+      setMemories(updatedMemories);
+      const updatedMemory = updatedMemories.find(m => m.id === selectedMemory.id);
+      setSelectedMemory(updatedMemory);
       setIsEditing(false);
     } catch (error) {
       console.error('Update error:', error);
