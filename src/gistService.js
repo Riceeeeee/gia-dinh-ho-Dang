@@ -1,17 +1,29 @@
 // src/gistService.js
-const GITHUB_TOKEN = import.meta.env.VITE_GITHUB_TOKEN;
 const GITHUB_API = 'https://api.github.com';
 let GIST_ID = import.meta.env.VITE_GITHUB_GIST_ID || null;
+
+// Get token từ localStorage hoặc environment
+const getToken = () => {
+  return localStorage.getItem('github_token') || import.meta.env.VITE_GITHUB_TOKEN || '';
+};
+
+// Set token vào localStorage
+export const setGitHubToken = (token) => {
+  localStorage.setItem('github_token', token);
+};
 
 /**
  * Tạo Gist mới để lưu trữ memories
  */
 export const createMemoriesGist = async () => {
+  const token = getToken();
+  if (!token) throw new Error('GitHub token chưa được cấu hình. Vui lòng nhập token.');
+  
   try {
     const response = await fetch(`${GITHUB_API}/gists`, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Accept': 'application/vnd.github+json',
       },
       body: JSON.stringify({
@@ -42,6 +54,8 @@ export const createMemoriesGist = async () => {
  * Load memories từ GitHub Gist
  */
 export const loadMemories = async () => {
+  const token = getToken();
+  
   try {
     const id = GIST_ID || localStorage.getItem('gist_id');
     if (!id) {
@@ -52,7 +66,7 @@ export const loadMemories = async () => {
 
     const response = await fetch(`${GITHUB_API}/gists/${id}`, {
       headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Authorization': token ? `Bearer ${token}` : '',
         'Accept': 'application/vnd.github+json',
       }
     });
@@ -73,6 +87,9 @@ export const loadMemories = async () => {
  * Lưu memories vào GitHub Gist
  */
 export const saveMemories = async (memories) => {
+  const token = getToken();
+  if (!token) throw new Error('GitHub token chưa được cấu hình. Vui lòng nhập token.');
+  
   try {
     const id = GIST_ID || localStorage.getItem('gist_id');
     if (!id) {
@@ -83,7 +100,7 @@ export const saveMemories = async (memories) => {
     const response = await fetch(`${GITHUB_API}/gists/${id}`, {
       method: 'PATCH',
       headers: {
-        'Authorization': `Bearer ${GITHUB_TOKEN}`,
+        'Authorization': `Bearer ${token}`,
         'Accept': 'application/vnd.github+json',
       },
       body: JSON.stringify({

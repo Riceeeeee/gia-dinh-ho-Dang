@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Heart, MessageCircle, Upload, X, Trash2, Pencil, Loader } from 'lucide-react';
-import { loadMemories, saveMemories, getGistId, createMemoriesGist } from './gistService';
+import { loadMemories, saveMemories, getGistId, createMemoriesGist, setGitHubToken } from './gistService';
 
 const FAMILIES = [
   "Chung",
@@ -54,11 +54,20 @@ function App() {
   const [likedPosts, setLikedPosts] = useState([]);
   const [isEditing, setIsEditing] = useState(false);
   const [editingCaption, setEditingCaption] = useState('');
+  const [showTokenModal, setShowTokenModal] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
   const fileInputRef = useRef(null);
 
   // Load từ GitHub Gist
   useEffect(() => {
     const loadData = async () => {
+      const token = localStorage.getItem('github_token');
+      if (!token) {
+        setShowTokenModal(true);
+        setLoading(false);
+        return;
+      }
+
       try {
         console.log('🔄 Loading from GitHub Gist...');
         const mems = await loadMemories();
@@ -202,6 +211,17 @@ function App() {
     }
   };
 
+  const handleTokenSubmit = (e) => {
+    e.preventDefault();
+    if (!tokenInput.trim()) {
+      alert('Vui lòng nhập GitHub token');
+      return;
+    }
+    setGitHubToken(tokenInput);
+    setShowTokenModal(false);
+    window.location.reload();
+  };
+
   return (
     <div className="min-h-screen bg-amber-50 font-sans text-amber-900 pb-20">
       <header className="bg-amber-100/80 backdrop-blur-md sticky top-0 z-10 border-b border-amber-200 shadow-sm">
@@ -324,6 +344,36 @@ function App() {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Token Modal */}
+      {showTokenModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl p-8 max-w-md w-full">
+            <h2 className="text-2xl font-bold text-amber-800 mb-2">Cấu hình GitHub Token</h2>
+            <p className="text-amber-700 mb-6 text-sm">Bạn cần cung cấp GitHub Personal Access Token (scope: gist) để có thể lưu kỷ niệm.</p>
+            
+            <form onSubmit={handleTokenSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-amber-800 mb-2">GitHub Token</label>
+                <input 
+                  type="password" 
+                  placeholder="ghp_..." 
+                  value={tokenInput}
+                  onChange={(e) => setTokenInput(e.target.value)}
+                  className="w-full px-4 py-2 border border-amber-200 rounded-lg focus:outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100"
+                />
+                <p className="text-xs text-amber-600 mt-2">
+                  📍 Tạo token: <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="underline hover:text-amber-800">github.com/settings/tokens</a>
+                </p>
+              </div>
+              
+              <button type="submit" className="w-full bg-amber-600 text-white py-2 rounded-lg font-bold hover:bg-amber-700 transition">
+                Lưu Token
+              </button>
+            </form>
           </div>
         </div>
       )}
