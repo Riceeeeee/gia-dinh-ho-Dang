@@ -1,13 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Heart, MessageCircle, Upload, X, Calendar, Image as ImageIcon, Video, Search, Trash2, Pencil, Loader } from 'lucide-react';
-import { initDB, saveData, getData, deleteData } from './db';
+import { storage, db } from './firebase';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
+import { collection, addDoc, query, onSnapshot, updateDoc, deleteDoc, doc, orderBy } from 'firebase/firestore';
 
 /**
  * Ứng dụng: Gia đình họ Đặng - Lưu giữ kỷ niệm
- * Tác giả: Chuyên gia React (Mô phỏng)
+ * Backend: Firebase (Firestore + Storage)
  * Cấu trúc dữ liệu (Data Structure):
- * Kỷ niệm (Memory): { id, type, caption, date, family: string, likes, comments } -> Dữ liệu file (ảnh/video) được lưu riêng trong IndexedDB.
- * Bình luận (Comment): { author: string, text: string, time: string }
+ * Kỷ niệm (Memory): { id, type, caption, date, family, likes, comments, imageUrl } -> Lưu trên Firestore
+ * Ảnh/Video: Lưu trên Firebase Storage
+ * Bình luận (Comment): { author, text, time }
  */
 
 const FAMILIES = [
@@ -84,47 +87,25 @@ const compressImage = (file, options = {}) => {
 
 
 // --- COMPONENT CON: MEMORY ITEM ---
-const MemoryItem = ({ memory, onSelect, onDataLoaded }) => {
-  const [mediaUrl, setMediaUrl] = useState(null);
+const MemoryItem = ({ memory, onSelect }) => {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    let objectUrl;
-    const loadMedia = async () => {
-      try {
-        setIsLoading(true);
-        const data = await getData(memory.id);
-        if (data) {
-          objectUrl = URL.createObjectURL(data);
-          setMediaUrl(objectUrl);
-          onDataLoaded(memory.id, objectUrl, data.type);
-        }
-      } catch (error) {
-        console.error("Lỗi khi tải media từ IndexedDB:", error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadMedia();
-
-    return () => {
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [memory.id, onDataLoaded]);
+    if (memory.imageUrl) {
+      setIsLoading(false);
+    }
+  }, [memory.imageUrl]);
 
   return (
-    <div className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg cursor-pointer shadow-sm hover:shadow-lg transition-all" onClick={() => onSelect({ ...memory, url: mediaUrl })}>
+    <div className="group relative aspect-square bg-amber-200 overflow-hidden rounded-lg cursor-pointer shadow-sm hover:shadow-lg transition-all" onClick={() => onSelect(memory)}>
       {isLoading ? (
         <div className="w-full h-full flex items-center justify-center text-amber-500"><Loader className="animate-spin" /></div>
-      ) : mediaUrl ? (
+      ) : memory.imageUrl ? (
         <>
-          {memory.type.startsWith('video') ? <video src={mediaUrl} className="w-full h-full object-cover" /> : <img src={mediaUrl} alt={memory.caption} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />}
+          {memory.type.startsWith('video') ? <video src={memory.imageUrl} className="w-full h-full object-cover" /> : <img src={memory.imageUrl} alt={memory.caption} className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" />}
           <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-4 text-white">
             <div className="flex items-center gap-1 font-bold"><Heart size={20} fill="white" /> {memory.likes}</div>
-            <div className="flex items-center gap-1 font-bold"><MessageCircle size={20} /> {memory.comments.length}</div>
+            <div className="flex items-center gap-1 font-bold"><MessageCircle size={20} /> {memory.comments?.length || 0}</div>
           </div>
           <div className="absolute top-2 right-2 text-white drop-shadow-md">{memory.type.startsWith('video') ? <Video size={16} /> : <ImageIcon size={16} />}</div>
           {memory.family && <div className="absolute bottom-2 left-2 text-white text-xs bg-black/50 px-1.5 py-0.5 rounded">{memory.family}</div>}
@@ -132,7 +113,7 @@ const MemoryItem = ({ memory, onSelect, onDataLoaded }) => {
       ) : (
         <div className="w-full h-full flex flex-col items-center justify-center text-center p-2 text-red-500">
             <ImageIcon size={24}/>
-            <p className="text-xs mt-1">Không tìm thấy dữ liệu ảnh/video</p>
+            <p className="text-xs mt-1">Không tìm thấy ảnh/video</p>
         </div>
       )}
     </div>
@@ -142,10 +123,8 @@ const MemoryItem = ({ memory, onSelect, onDataLoaded }) => {
 
 const App = () => {
   // --- KHỞI TẠO STATE (TRẠNG THÁI) ---
-  const [memories, setMemories] = useState(() => {
-    const saved = localStorage.getItem('family_memories_metadata');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [memories, setMemories] = useState([]);
+  const [isLoadingMemories, setIsLoadingMemories] = useState(true);
 
   // State cho bộ lọc
   const [filterDate, setFilterDate] = useState('');
@@ -169,19 +148,29 @@ const App = () => {
   const [editingCaption, setEditingCaption] = useState('');
   const [likedPosts, setLikedPosts] = useState([]);
   const [currentUser, setCurrentUser] = useState('');
-  const [isDbReady, setIsDbReady] = useState(false);
 
   // --- HIỆU ỨNG (EFFECTS) ---
 
+  // Load memories từ Firestore real-time
   useEffect(() => {
-    initDB().then(() => setIsDbReady(true)).catch(err => console.error("Không thể khởi tạo DB", err));
+    const q = query(collection(db, 'memories'), orderBy('date', 'desc'));
+    
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const memoryList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        comments: doc.data().comments || []
+      }));
+      setMemories(memoryList);
+      setIsLoadingMemories(false);
+    }, (error) => {
+      console.error("Lỗi khi tải memories từ Firestore:", error);
+      setIsLoadingMemories(false);
+    });
+
+    return () => unsubscribe();
   }, []);
   
-  useEffect(() => {
-    // Chỉ lưu metadata vào localStorage
-    localStorage.setItem('family_memories_metadata', JSON.stringify(memories));
-  }, [memories]);
-
   useEffect(() => {
     const savedLikedPosts = localStorage.getItem('family_liked_posts');
     if (savedLikedPosts) setLikedPosts(JSON.parse(savedLikedPosts));
@@ -198,10 +187,6 @@ const App = () => {
 
 
   // --- CÁC HÀM XỬ LÝ (HANDLERS) ---
-  const handleDataLoaded = () => {
-    // Media loading callback
-  };
-
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -210,7 +195,7 @@ const App = () => {
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl);
       }
-      // Dùng createObjectURL để xem trước, không đọc cả file vào bộ nhớ
+      // Dùng createObjectURL để xem trước
       const objectUrl = URL.createObjectURL(file);
       setPreviewUrl(objectUrl);
     }
@@ -218,7 +203,6 @@ const App = () => {
 
   const handleSaveMemory = async () => {
     if (!newFile) return alert("Vui lòng chọn ảnh hoặc video!");
-    if (!isDbReady) return alert("Cơ sở dữ liệu chưa sẵn sàng, vui lòng thử lại sau giây lát.");
     
     let fileToSave = newFile;
 
@@ -227,11 +211,10 @@ const App = () => {
         try {
             console.log(`Kích thước ảnh gốc: ${(newFile.size / 1024 / 1024).toFixed(2)} MB`);
             const compressedBlob = await compressImage(newFile, {
-                quality: 0.85, // Chất lượng 85%
-                maxWidth: 1920, // Chiều rộng tối đa 1920px
-                maxHeight: 1920, // Chiều cao tối đa 1920px
+                quality: 0.85,
+                maxWidth: 1920,
+                maxHeight: 1920,
             });
-            // Tạo một đối tượng File mới từ Blob đã nén
             fileToSave = new File([compressedBlob], newFile.name, {
                 type: compressedBlob.type,
                 lastModified: Date.now(),
@@ -239,53 +222,70 @@ const App = () => {
             console.log(`Kích thước ảnh đã nén: ${(fileToSave.size / 1024 / 1024).toFixed(2)} MB`);
         } catch (error) {
             console.error("Lỗi khi nén ảnh, sẽ lưu ảnh gốc:", error);
-            alert("Không thể nén ảnh, kỷ niệm sẽ được lưu với ảnh gốc.");
-            fileToSave = newFile; // Nếu lỗi, quay lại dùng file gốc
+            fileToSave = newFile;
         }
     }
     // --- Kết thúc nén ảnh ---
 
-    const newMemoryId = Date.now();
-    const newMemoryMetadata = {
-      id: newMemoryId,
-      type: fileToSave.type.startsWith('video') ? 'video' : fileToSave.type,
-      caption: newCaption || 'Khoảnh khắc gia đình',
-      family: newFamily,
-      date: new Date().toISOString().split('T')[0],
-      likes: 0,
-      comments: []
-    };
-
     try {
-      await saveData(newMemoryId, fileToSave); // Lưu file đã nén (hoặc file gốc)
-      setMemories([newMemoryMetadata, ...memories]);
+      setIsUploading(true);
+
+      // Upload file lên Firebase Storage
+      const timestamp = Date.now();
+      const storagePath = `memories/${timestamp}/${fileToSave.name}`;
+      const storageRef = ref(storage, storagePath);
+      
+      await uploadBytes(storageRef, fileToSave);
+      const imageUrl = await getDownloadURL(storageRef);
+
+      // Lưu metadata lên Firestore
+      await addDoc(collection(db, 'memories'), {
+        type: fileToSave.type.startsWith('video') ? 'video' : fileToSave.type,
+        caption: newCaption || 'Khoảnh khắc gia đình',
+        family: newFamily,
+        date: new Date().toISOString().split('T')[0],
+        imageUrl: imageUrl,
+        likes: 0,
+        comments: [],
+        createdAt: new Date(),
+        storagePath: storagePath
+      });
+
       // Reset form
-      setNewCaption(''); 
-      setNewFile(null); 
+      setNewCaption('');
+      setNewFile(null);
       if (previewUrl) {
-        URL.revokeObjectURL(previewUrl); // Dọn dẹp URL xem trước
+        URL.revokeObjectURL(previewUrl);
       }
-      setPreviewUrl(''); 
-      setIsUploading(false); 
+      setPreviewUrl('');
+      setIsUploading(false);
       setNewFamily(FAMILIES[0]);
 
     } catch (error) {
-      console.error("Lỗi khi lưu vào IndexedDB:", error);
+      console.error("Lỗi khi lưu vào Firebase:", error);
       alert("Đã xảy ra lỗi khi lưu kỷ niệm. Vui lòng thử lại.");
+      setIsUploading(false);
     }
   };
 
-  const handleLike = (id) => {
+  const handleLike = async (id) => {
     if (likedPosts.includes(id)) return;
-    const updatedMemories = memories.map(mem => mem.id === id ? { ...mem, likes: mem.likes + 1 } : mem);
-    setMemories(updatedMemories);
-    if (selectedMemory?.id === id) setSelectedMemory(prev => ({ ...prev, likes: prev.likes + 1 }));
-    const newLikedPosts = [...likedPosts, id];
-    setLikedPosts(newLikedPosts);
-    localStorage.setItem('family_liked_posts', JSON.stringify(newLikedPosts));
+    
+    try {
+      const memory = memories.find(m => m.id === id);
+      await updateDoc(doc(db, 'memories', id), {
+        likes: (memory.likes || 0) + 1
+      });
+      
+      const newLikedPosts = [...likedPosts, id];
+      setLikedPosts(newLikedPosts);
+      localStorage.setItem('family_liked_posts', JSON.stringify(newLikedPosts));
+    } catch (error) {
+      console.error("Lỗi khi like:", error);
+    }
   };
 
-  const handleAddComment = () => {
+  const handleAddComment = async () => {
     if (!newComment.trim() || !selectedMemory) return;
 
     let author = currentUser;
@@ -296,25 +296,40 @@ const App = () => {
         setCurrentUser(author);
         localStorage.setItem('family_app_user', author);
       } else {
-        return; 
+        return;
       }
     }
 
-    const commentObj = { author, text: newComment, time: new Date().toLocaleDateString('vi-VN') };
-    const updatedMemories = memories.map(mem => mem.id === selectedMemory.id ? { ...mem, comments: [...mem.comments, commentObj] } : mem);
-    setMemories(updatedMemories);
-    setSelectedMemory(prev => ({ ...prev, comments: [...prev.comments, commentObj] }));
-    setNewComment('');
+    try {
+      const commentObj = { author, text: newComment, time: new Date().toLocaleDateString('vi-VN') };
+      const updatedComments = [...(selectedMemory.comments || []), commentObj];
+      
+      await updateDoc(doc(db, 'memories', selectedMemory.id), {
+        comments: updatedComments
+      });
+      
+      setNewComment('');
+    } catch (error) {
+      console.error("Lỗi khi thêm comment:", error);
+    }
   };
 
   const handleDelete = async (id) => {
     if (window.confirm("Bạn có chắc chắn muốn xóa kỷ niệm này vĩnh viễn không?")) {
       try {
-        await deleteData(id);
-        setMemories(memories.filter(mem => mem.id !== id));
+        const memory = memories.find(m => m.id === id);
+        
+        // Xóa ảnh/video từ Firebase Storage
+        if (memory.storagePath) {
+          const fileRef = ref(storage, memory.storagePath);
+          await deleteObject(fileRef);
+        }
+        
+        // Xóa metadata từ Firestore
+        await deleteDoc(doc(db, 'memories', id));
         setSelectedMemory(null);
       } catch (error) {
-        console.error("Lỗi khi xóa dữ liệu trong IndexedDB:", error);
+        console.error("Lỗi khi xóa dữ liệu trong Firebase:", error);
         alert("Xóa kỷ niệm thất bại. Vui lòng thử lại.");
       }
     }
@@ -326,12 +341,17 @@ const App = () => {
     setEditingCaption(selectedMemory.caption);
   };
 
-  const handleUpdateCaption = () => {
+  const handleUpdateCaption = async () => {
     if (!selectedMemory) return;
-    const updatedMemories = memories.map(mem => mem.id === selectedMemory.id ? { ...mem, caption: editingCaption } : mem);
-    setMemories(updatedMemories);
-    setSelectedMemory(prev => ({ ...prev, caption: editingCaption }));
-    setIsEditing(false);
+    
+    try {
+      await updateDoc(doc(db, 'memories', selectedMemory.id), {
+        caption: editingCaption
+      });
+      setIsEditing(false);
+    } catch (error) {
+      console.error("Lỗi khi cập nhật caption:", error);
+    }
   };
 
   const filteredMemories = memories.filter(mem => 
@@ -349,9 +369,8 @@ const App = () => {
             <h1 className="text-2xl md:text-3xl font-serif font-bold text-amber-800">Gia đình họ Đặng</h1>
             <p className="text-sm text-amber-700 italic">Ông Phiếm & Bà Dịu - Kỷ niệm còn mãi</p>
           </div>
-          <button onClick={() => setIsUploading(true)} className="flex items-center gap-2 bg-amber-800 text-amber-50 px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md" disabled={!isDbReady}>
+          <button onClick={() => setIsUploading(true)} className="flex items-center gap-2 bg-amber-800 text-amber-50 px-5 py-2 rounded-full hover:bg-amber-900 transition-colors shadow-md">
             <Upload size={18} /><span>Tải lên kỷ niệm</span>
-            {!isDbReady && <Loader size={18} className="animate-spin" />}
           </button>
         </div>
       </header>
@@ -376,12 +395,14 @@ const App = () => {
       </div>
 
       <main className="max-w-6xl mx-auto px-4">
-        {filteredMemories.length === 0 ? (
+        {isLoadingMemories ? (
+          <div className="text-center py-20 text-amber-400"><p className="text-xl">Đang tải kỷ niệm...</p><Loader className="animate-spin mx-auto mt-4" /></div>
+        ) : filteredMemories.length === 0 ? (
           <div className="text-center py-20 text-amber-400"><p className="text-xl">Chưa có kỷ niệm nào phù hợp...</p></div>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-1 md:gap-6">
             {filteredMemories.map((mem) => (
-              <MemoryItem key={mem.id} memory={mem} onSelect={setSelectedMemory} onDataLoaded={handleDataLoaded} />
+              <MemoryItem key={mem.id} memory={mem} onSelect={setSelectedMemory} />
             ))}
           </div>
         )}
@@ -410,7 +431,7 @@ const App = () => {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm" onClick={() => setSelectedMemory(null)}>
           <div className="bg-white rounded-xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col md:flex-row shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <div className="flex-1 bg-black flex items-center justify-center bg-amber-50/10">
-              {selectedMemory.type.startsWith('video') ? <video src={selectedMemory.url} controls autoPlay className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" /> : <img src={selectedMemory.url} alt="Detail" className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" />}
+              {selectedMemory.type.startsWith('video') ? <video src={selectedMemory.imageUrl} controls autoPlay className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" /> : <img src={selectedMemory.imageUrl} alt="Detail" className="max-h-[50vh] md:max-h-[90vh] w-full object-contain" />}
             </div>
             <div className="w-full md:w-[350px] lg:w-[400px] flex flex-col bg-white border-l">
               <div className="p-4 border-b flex items-center justify-between">
@@ -448,7 +469,7 @@ const App = () => {
                   </div>
                 </div>
                 
-                {selectedMemory.comments.map((cmt, idx) => (
+                {selectedMemory.comments && selectedMemory.comments.map((cmt, idx) => (
                   <div key={idx} className="flex gap-3 animate-fade-in">
                     <div className="w-8 h-8 rounded-full bg-gray-200 flex-shrink-0 flex items-center justify-center text-sm font-semibold text-gray-600">
                       {cmt.author ? cmt.author.charAt(0).toUpperCase() : '?'}
